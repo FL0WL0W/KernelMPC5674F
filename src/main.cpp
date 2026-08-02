@@ -93,10 +93,12 @@ extern "C" int main(void)
     asm("wrteei 1");
     auto canService = new MPC5674FCANService(CANBaudRate::Kbps500, CANBaudRate::Disabled, CANBaudRate::Disabled, CANBaudRate::Disabled, false);
     canService->Send({0x7E8, 0}, {{0x01, 0x99}}, 2);
+    canService->RegisterReceiveCallBack({0x7E0, 0}, [](can_send_callback_t send, const CANData_t data, const uint8_t dataLength) {
+        send({0x7E8, 0}, data, dataLength);
+    });
     while(true) 
     {
-        for(volatile int i = 0; i < 10000; i++) ;
-
+        for(volatile int i = 0; i < 100000; i++) ;
     }
     return 0;
 }

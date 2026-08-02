@@ -504,7 +504,7 @@ Reset_Entry:
 	align_and_branch Default_Handler 		# ISR157
 	align_and_branch Default_Handler 		# ISR158
 	align_and_branch Default_Handler 		# ISR159
-	align_and_branch Default_Handler 		# ISR160
+	align_and_branch CAN_A_RXFIFO_ISR 		# ISR160: CAN A BUF5 / RXFIFO
 	align_and_branch Default_Handler 		# ISR161
 	align_and_branch Default_Handler 		# ISR162
 	align_and_branch Default_Handler 		# ISR163
@@ -525,7 +525,7 @@ Reset_Entry:
 	align_and_branch Default_Handler 		# ISR178
 	align_and_branch Default_Handler 		# ISR179
 	align_and_branch Default_Handler 		# ISR180
-	align_and_branch Default_Handler 		# ISR181
+	align_and_branch CAN_C_RXFIFO_ISR 		# ISR181: CAN C BUF5 / RXFIFO
 	align_and_branch Default_Handler 		# ISR182
 	align_and_branch Default_Handler 		# ISR183
 	align_and_branch Default_Handler 		# ISR184
@@ -632,7 +632,7 @@ Reset_Entry:
 	align_and_branch Default_Handler 		# ISR285
 	align_and_branch Default_Handler 		# ISR286
 	align_and_branch Default_Handler 		# ISR287
-	align_and_branch Default_Handler 		# ISR288
+	align_and_branch CAN_B_RXFIFO_ISR 		# ISR288: CAN B BUF5 / RXFIFO
 	align_and_branch Default_Handler 		# ISR289
 	align_and_branch Default_Handler 		# ISR290
 	align_and_branch Default_Handler 		# ISR291
@@ -660,7 +660,7 @@ Reset_Entry:
 	align_and_branch Default_Handler 		# ISR313
 	align_and_branch Default_Handler 		# ISR314
 	align_and_branch Default_Handler 		# ISR315
-	align_and_branch Default_Handler 		# ISR316
+	align_and_branch CAN_D_RXFIFO_ISR 		# ISR316: CAN D BUF5 / RXFIFO
 	align_and_branch Default_Handler 		# ISR317
 	align_and_branch Default_Handler 		# ISR318
 	align_and_branch Default_Handler 		# ISR319
