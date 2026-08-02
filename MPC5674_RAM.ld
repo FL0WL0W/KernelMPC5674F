@@ -12,29 +12,29 @@ SRAM_BASE_ADDR = 0x40020000;
 MEMORY
 {
     SRAM :	org = 0x40020000,   len = 128K
-       
 }
-
 
 SECTIONS
 {
-    .startup : ALIGN(0x400)
-    {
-    __start = . ;
-    	*(.startup)
-    } > SRAM
+    . = ORIGIN(SRAM);
     
-    .core_exceptions_table   : ALIGN(0x10)
+    .intc_vector_table ALIGN(0x10000) :
+    {
+      KEEP(*(.intc_vector_table))
+    } > SRAM
+
+    .core_exceptions_table ALIGN(0x10) :
     {
       __IVPR_VALUE = . ;
       KEEP(*(.core_exceptions_table))
     } > SRAM
 
-    .intc_vector_table   : ALIGN(0x800)  
+    .startup ALIGN(4) :
     {
-      KEEP(*(.intc_vector_table))
+    __start = . ;
+    	*(.startup)
     } > SRAM
-             
+    
     .text_booke :
     { 
       INPUT_SECTION_FLAGS (!SHF_PPC_VLE)
