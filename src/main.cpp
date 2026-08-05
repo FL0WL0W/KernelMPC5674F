@@ -4,6 +4,16 @@
 using namespace EmbeddedIOServices;
 using namespace MPC5674F;
 
+// Override this weak implementation with the target flash driver. Returning
+// false prevents TransferData from acknowledging data that was not programmed.
+extern "C" __attribute__((weak)) bool WriteToFlash(std::uint32_t address,
+                                                    const std::uint8_t* data,
+                                                    std::size_t size) {
+    (void)address;
+    (void)data;
+    (void)size;
+    return false;
+}
 
 namespace {
 
@@ -18,6 +28,488 @@ constexpr std::uint32_t kDSPIRxFifoDrainFlag = 0x00020000U;
 // Run STM at 1 MHz (256 MHz system clock / 256) and poll it from main instead.
 constexpr std::uint32_t kSTMConfiguration1MHz = 0x0000FF01U;
 constexpr std::uint32_t kCompanionServicePeriodTicks = 12500U;
+
+constexpr std::uint32_t kFlashStart = 0x00000000U;
+constexpr std::uint32_t kFlashEnd = 0x003FFFFFU;
+constexpr std::uint32_t kSRAMStart = 0x40000000U;
+constexpr std::uint32_t kSRAMEnd = 0x4003FFFFU;
+constexpr std::uint16_t kMaximumReadMemoryLength = 4094U;
+constexpr std::uint16_t kMaximumTransferDataMessageLength = 0x0FFFU;
+
+struct DownloadState {
+    std::uint32_t Address = 0U;
+    std::uint32_t Size = 0U;
+    std::uint32_t BytesTransferred = 0U;
+    std::uint8_t DataFormatIdentifier = 0U;
+    std::uint8_t NextBlockSequenceCounter = 1U;
+    std::uint8_t PreviousBlockSequenceCounter = 0U;
+    bool PreviousBlockValid = false;
+    bool Active = false;
+};
+
+DownloadState g_downloadState;
+
+struct UploadState {
+    std::uint32_t Address = 0U;
+    std::uint32_t Size = 0U;
+    std::uint32_t BytesTransferred = 0U;
+    std::uint8_t DataFormatIdentifier = 0U;
+    std::uint8_t NextBlockSequenceCounter = 1U;
+    std::uint16_t PreviousResponseLength = 0U;
+    bool PreviousResponseValid = false;
+    bool Active = false;
+    std::uint8_t PreviousResponse[kMaximumTransferDataMessageLength];
+};
+
+UploadState g_uploadState;
+
+bool IsReadableMemoryRange(std::uint32_t address, std::uint32_t length) {
+    if (length == 0U || length > kMaximumReadMemoryLength) {
+        return false;
+    }
+
+    const std::uint32_t endAddress = address + length - 1U;
+    if (endAddress < address) {
+        return false;
+    }
+
+    return (address >= kFlashStart && endAddress <= kFlashEnd) ||
+           (address >= kSRAMStart && endAddress <= kSRAMEnd);
+}
+
+bool IsMappedMemoryRange(std::uint32_t address, std::uint32_t length) {
+    if (length == 0U) {
+        return false;
+    }
+
+    const std::uint32_t endAddress = address + length - 1U;
+    if (endAddress < address) {
+        return false;
+    }
+
+    return (address >= kFlashStart && endAddress <= kFlashEnd) ||
+           (address >= kSRAMStart && endAddress <= kSRAMEnd);
+}
+
+bool IsFlashRange(std::uint32_t address, std::uint32_t length) {
+    if (length == 0U) {
+        return false;
+    }
+    const std::uint32_t endAddress = address + length - 1U;
+    return endAddress >= address &&
+           address >= kFlashStart && endAddress <= kFlashEnd;
+}
+
+bool IsSRAMRange(std::uint32_t address, std::uint32_t length) {
+    if (length == 0U) {
+        return false;
+    }
+    const std::uint32_t endAddress = address + length - 1U;
+    return endAddress >= address &&
+           address >= kSRAMStart && endAddress <= kSRAMEnd;
+}
+
+size_t HandleDiagnosticRequest27(communication_send_callback_t send, const uint8_t *data, size_t length) {
+    if (length >= 1U && data[0] == 0x01U) {
+        static const std::uint8_t response[] = {
+            0x67U, 0x01U, 0x00U, 0x00U
+        };
+        send(response, sizeof(response));
+        return length;
+    }
+    return 0;
+}
+
+size_t HandleDiagnosticRequest23(communication_send_callback_t send, const uint8_t *data, size_t length) {
+    if (length < 3U) {
+        const std::uint8_t response[] = {0x7FU, 0x23U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    // ISO 14229-1 ALFID: low nibble is the address width and high nibble is
+    // the memory-size width, both expressed in bytes.
+    const std::uint8_t addressLength = data[0] & 0x0FU;
+    const std::uint8_t sizeLength = data[0] >> 4U;
+    if (addressLength == 0U || addressLength > 4U ||
+        sizeLength == 0U || sizeLength > 4U ||
+        length != static_cast<size_t>(1U + addressLength + sizeLength)) {
+        const std::uint8_t response[] = {0x7FU, 0x23U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    std::uint32_t address = 0U;
+    for (std::uint8_t i = 0U; i < addressLength; ++i) {
+        address = (address << 8U) | data[1U + i];
+    }
+
+    std::uint32_t readLength = 0U;
+    for (std::uint8_t i = 0U; i < sizeLength; ++i) {
+        readLength = (readLength << 8U) | data[1U + addressLength + i];
+    }
+
+    if (!IsReadableMemoryRange(address, readLength)) {
+        const std::uint8_t response[] = {0x7FU, 0x23U, 0x31U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    // The callback is serviced serially by the ISO-TP service.
+    std::uint8_t response[1U + readLength];
+    response[0] = 0x63U;
+
+    const volatile auto* memory =
+        reinterpret_cast<const volatile std::uint8_t*>(address);
+    for (std::uint32_t i = 0U; i < readLength; ++i) {
+        response[1U + i] = memory[i];
+    }
+
+    send(response, 1U + readLength);
+    return length;
+}
+
+size_t HandleDiagnosticRequest34(communication_send_callback_t send,
+                                 const uint8_t* data,
+                                 size_t length) {
+    // RequestDownload: DFI, ALFID, memoryAddress, memorySize.
+    if (length < 4U) {
+        const std::uint8_t response[] = {0x7FU, 0x34U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint8_t dataFormatIdentifier = data[0];
+    const std::uint8_t addressLength = data[1] & 0x0FU;
+    const std::uint8_t sizeLength = data[1] >> 4U;
+    if (addressLength == 0U || addressLength > 4U ||
+        sizeLength == 0U || sizeLength > 4U ||
+        length != static_cast<size_t>(2U + addressLength + sizeLength)) {
+        const std::uint8_t response[] = {0x7FU, 0x34U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    // DFI high nibble selects compression and low nibble selects encryption.
+    // Only the standard no-compression/no-encryption format is supported yet.
+    if (dataFormatIdentifier != 0x00U) {
+        const std::uint8_t response[] = {0x7FU, 0x34U, 0x31U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    std::uint32_t address = 0U;
+    for (std::uint8_t i = 0U; i < addressLength; ++i) {
+        address = (address << 8U) | data[2U + i];
+    }
+
+    std::uint32_t downloadSize = 0U;
+    for (std::uint8_t i = 0U; i < sizeLength; ++i) {
+        downloadSize = (downloadSize << 8U) |
+                       data[2U + addressLength + i];
+    }
+
+    if (!IsMappedMemoryRange(address, downloadSize)) {
+        const std::uint8_t response[] = {0x7FU, 0x34U, 0x31U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    g_downloadState.Address = address;
+    g_downloadState.Size = downloadSize;
+    g_downloadState.BytesTransferred = 0U;
+    g_downloadState.DataFormatIdentifier = dataFormatIdentifier;
+    g_downloadState.NextBlockSequenceCounter = 1U;
+    g_downloadState.PreviousBlockSequenceCounter = 0U;
+    g_downloadState.PreviousBlockValid = false;
+    g_downloadState.Active = true;
+    g_uploadState.Active = false;
+
+    // A lengthFormatIdentifier of 0x20 says maxNumberOfBlockLength occupies
+    // two bytes. The value includes the 0x36 SID and block sequence counter.
+    const std::uint8_t response[] = {
+        0x74U,
+        0x20U,
+        static_cast<std::uint8_t>(kMaximumTransferDataMessageLength >> 8U),
+        static_cast<std::uint8_t>(kMaximumTransferDataMessageLength)
+    };
+    send(response, sizeof(response));
+    return length;
+}
+
+size_t HandleDiagnosticRequest35(communication_send_callback_t send,
+                                 const uint8_t* data,
+                                 size_t length) {
+    // RequestUpload: DFI, ALFID, memoryAddress, memorySize.
+    if (length < 4U) {
+        const std::uint8_t response[] = {0x7FU, 0x35U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint8_t dataFormatIdentifier = data[0];
+    const std::uint8_t addressLength = data[1] & 0x0FU;
+    const std::uint8_t sizeLength = data[1] >> 4U;
+    if (addressLength == 0U || addressLength > 4U ||
+        sizeLength == 0U || sizeLength > 4U ||
+        length != static_cast<size_t>(2U + addressLength + sizeLength)) {
+        const std::uint8_t response[] = {0x7FU, 0x35U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    // Compression and encryption identifiers are manufacturer-specific. The
+    // initial implementation supports only uncompressed, unencrypted upload.
+    if (dataFormatIdentifier != 0x00U) {
+        const std::uint8_t response[] = {0x7FU, 0x35U, 0x31U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    std::uint32_t address = 0U;
+    for (std::uint8_t i = 0U; i < addressLength; ++i) {
+        address = (address << 8U) | data[2U + i];
+    }
+
+    std::uint32_t uploadSize = 0U;
+    for (std::uint8_t i = 0U; i < sizeLength; ++i) {
+        uploadSize = (uploadSize << 8U) |
+                     data[2U + addressLength + i];
+    }
+
+    // Unlike ReadMemoryByAddress, RequestUpload is a streamed operation, so
+    // the total size is limited only by the mapped address range.
+    if (!IsMappedMemoryRange(address, uploadSize)) {
+        const std::uint8_t response[] = {0x7FU, 0x35U, 0x31U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    g_uploadState.Address = address;
+    g_uploadState.Size = uploadSize;
+    g_uploadState.BytesTransferred = 0U;
+    g_uploadState.DataFormatIdentifier = dataFormatIdentifier;
+    g_uploadState.NextBlockSequenceCounter = 1U;
+    g_uploadState.PreviousResponseLength = 0U;
+    g_uploadState.PreviousResponseValid = false;
+    g_uploadState.Active = true;
+    g_downloadState.Active = false;
+
+    // For an upload, maxNumberOfBlockLength is the maximum complete 0x76
+    // response: SID + block sequence counter + data.
+    const std::uint8_t response[] = {
+        0x75U,
+        0x20U,
+        static_cast<std::uint8_t>(kMaximumTransferDataMessageLength >> 8U),
+        static_cast<std::uint8_t>(kMaximumTransferDataMessageLength)
+    };
+    send(response, sizeof(response));
+    return length;
+}
+
+size_t HandleUploadTransferData(communication_send_callback_t send,
+                                const uint8_t* data,
+                                size_t length) {
+    // During RequestUpload, TransferData contains only the block sequence
+    // counter. The uploaded bytes are carried in the positive response.
+    if (length != 1U) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    if (!g_uploadState.Active) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x24U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint8_t blockSequenceCounter = data[0];
+    if (g_uploadState.PreviousResponseValid &&
+        blockSequenceCounter ==
+            g_uploadState.PreviousResponse[1]) {
+        // The client may repeat the previous request if its 0x76 response was
+        // lost. Replay the exact response without advancing transfer state.
+        send(g_uploadState.PreviousResponse,
+             g_uploadState.PreviousResponseLength);
+        return length;
+    }
+
+    if (blockSequenceCounter !=
+        g_uploadState.NextBlockSequenceCounter) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x73U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    if (g_uploadState.BytesTransferred >= g_uploadState.Size) {
+        // All requested bytes have been transferred; the next valid service
+        // is RequestTransferExit (0x37), not another TransferData request.
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x24U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    constexpr std::uint32_t maximumDataLength =
+        kMaximumTransferDataMessageLength - 2U;
+    const std::uint32_t remaining =
+        g_uploadState.Size - g_uploadState.BytesTransferred;
+    const std::uint32_t blockLength =
+        remaining < maximumDataLength ? remaining : maximumDataLength;
+    const std::uint32_t blockAddress =
+        g_uploadState.Address + g_uploadState.BytesTransferred;
+
+    g_uploadState.PreviousResponse[0] = 0x76U;
+    g_uploadState.PreviousResponse[1] = blockSequenceCounter;
+    const volatile auto* memory =
+        reinterpret_cast<const volatile std::uint8_t*>(blockAddress);
+    for (std::uint32_t i = 0U; i < blockLength; ++i) {
+        g_uploadState.PreviousResponse[2U + i] = memory[i];
+    }
+
+    g_uploadState.PreviousResponseLength =
+        static_cast<std::uint16_t>(2U + blockLength);
+    g_uploadState.PreviousResponseValid = true;
+    g_uploadState.BytesTransferred += blockLength;
+    g_uploadState.NextBlockSequenceCounter =
+        static_cast<std::uint8_t>(blockSequenceCounter + 1U);
+
+    send(g_uploadState.PreviousResponse,
+         g_uploadState.PreviousResponseLength);
+    return length;
+}
+
+size_t HandleDownloadTransferData(communication_send_callback_t send,
+                                  const uint8_t* data,
+                                  size_t length) {
+    // During RequestDownload, TransferData contains a block sequence counter
+    // followed by the bytes to write into the requested memory range.
+    if (length < 2U ||
+        length > kMaximumTransferDataMessageLength - 1U) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint8_t blockSequenceCounter = data[0];
+    if (g_downloadState.PreviousBlockValid &&
+        blockSequenceCounter ==
+            g_downloadState.PreviousBlockSequenceCounter) {
+        // The previous data was already committed. A repeated counter means
+        // the client lost the acknowledgement, so acknowledge without writing
+        // or advancing the destination a second time.
+        const std::uint8_t response[] = {0x76U, blockSequenceCounter};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    if (blockSequenceCounter !=
+        g_downloadState.NextBlockSequenceCounter) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x73U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    if (g_downloadState.BytesTransferred >= g_downloadState.Size) {
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x24U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint32_t blockLength =
+        static_cast<std::uint32_t>(length - 1U);
+    const std::uint32_t remaining =
+        g_downloadState.Size - g_downloadState.BytesTransferred;
+    if (blockLength > remaining) {
+        // The block would exceed the range authorized by RequestDownload.
+        g_downloadState.Active = false;
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x71U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const std::uint32_t blockAddress =
+        g_downloadState.Address + g_downloadState.BytesTransferred;
+    const std::uint8_t* blockData = data + 1U;
+
+    bool writeSucceeded = false;
+    if (IsSRAMRange(blockAddress, blockLength)) {
+        volatile auto* memory =
+            reinterpret_cast<volatile std::uint8_t*>(blockAddress);
+        for (std::uint32_t i = 0U; i < blockLength; ++i) {
+            memory[i] = blockData[i];
+        }
+        writeSucceeded = true;
+    } else if (IsFlashRange(blockAddress, blockLength)) {
+        writeSucceeded = WriteToFlash(blockAddress, blockData, blockLength);
+    }
+
+    if (!writeSucceeded) {
+        g_downloadState.Active = false;
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x72U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    g_downloadState.BytesTransferred += blockLength;
+    g_downloadState.PreviousBlockSequenceCounter = blockSequenceCounter;
+    g_downloadState.PreviousBlockValid = true;
+    g_downloadState.NextBlockSequenceCounter =
+        static_cast<std::uint8_t>(blockSequenceCounter + 1U);
+
+    const std::uint8_t response[] = {0x76U, blockSequenceCounter};
+    send(response, sizeof(response));
+    return length;
+}
+
+size_t HandleDiagnosticRequest36(communication_send_callback_t send,
+                                 const uint8_t* data,
+                                 size_t length) {
+    if (g_uploadState.Active) {
+        return HandleUploadTransferData(send, data, length);
+    }
+    if (g_downloadState.Active) {
+        return HandleDownloadTransferData(send, data, length);
+    }
+
+    const std::uint8_t response[] = {0x7FU, 0x36U, 0x24U};
+    send(response, sizeof(response));
+    return length;
+}
+
+size_t HandleDiagnosticRequest(communication_send_callback_t send,
+                                    const void* data,
+                                    size_t length) {
+    const auto* request = static_cast<const uint8_t*>(data);
+
+    if (length == 0U) {
+        return 0U;
+    }
+
+    switch(request[0]) {
+        case 0x23U:
+            HandleDiagnosticRequest23(send, request + 1, length - 1U);
+            return length;
+        case 0x34U:
+            HandleDiagnosticRequest34(send, request + 1, length - 1U);
+            return length;
+        case 0x35U:
+            HandleDiagnosticRequest35(send, request + 1, length - 1U);
+            return length;
+        case 0x36U:
+            HandleDiagnosticRequest36(send, request + 1, length - 1U);
+            return length;
+        case 0x27U:
+            HandleDiagnosticRequest27(send, request + 1, length - 1U);
+            return length;
+        default: {
+            const std::uint8_t response[] = {0x7FU, request[0], 0x11U};
+            send(response, sizeof(response));
+            return length;
+        }
+    }
+
+}
 
 void InitializeCompanionDSPI() {
     // Match the DSPI-D setup used by the bootloader. The bootloader has already
@@ -91,11 +583,10 @@ extern "C" int main(void)
 {
     InitializeCompanionDSPI();
     asm("wrteei 1");
-    auto canService = new MPC5674FCANService(CANBaudRate::Kbps500, CANBaudRate::Disabled, CANBaudRate::Disabled, CANBaudRate::Disabled, false);
+    ICANService* canService = new MPC5674FCANService(CANBaudRate::Kbps500, CANBaudRate::Disabled, CANBaudRate::Disabled, CANBaudRate::Disabled, false);
     canService->Send({0x7E8, 0}, {{0x01, 0x99}}, 2);
-    canService->RegisterReceiveCallBack({0x7E0, 0}, [](can_send_callback_t send, const CANData_t data, const uint8_t dataLength) {
-        send({0x7E8, 0}, data, dataLength);
-    });
+    ICommunicationService* isotpService = canService->GetISOTPService({0x7E0, 0}, {0x7E8, 0});
+    isotpService->RegisterReceiveCallBack(HandleDiagnosticRequest);
     while(true) 
     {
         for(volatile int i = 0; i < 100000; i++) ;
