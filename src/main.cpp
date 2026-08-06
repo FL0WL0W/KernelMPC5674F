@@ -1,5 +1,6 @@
 #include "MPC5674FCANService.h"
 #include "MPC5674F.h"
+#include "LZ4.h"
 
 using namespace EmbeddedIOServices;
 using namespace MPC5674F;
@@ -28,6 +29,8 @@ constexpr std::uint32_t kDSPIRxFifoDrainFlag = 0x00020000U;
 // Run STM at 1 MHz (256 MHz system clock / 256) and poll it from main instead.
 constexpr std::uint32_t kSTMConfiguration1MHz = 0x0000FF01U;
 constexpr std::uint32_t kCompanionServicePeriodTicks = 12500U;
+constexpr std::uint16_t kEMIOS11InterruptVector = 62U;
+constexpr std::uint8_t kEMIOS11InterruptPriority = 2U;
 
 constexpr std::uint32_t kFlashStart = 0x00000000U;
 constexpr std::uint32_t kFlashEnd = 0x003FFFFFU;
@@ -35,6 +38,12 @@ constexpr std::uint32_t kSRAMStart = 0x40000000U;
 constexpr std::uint32_t kSRAMEnd = 0x4003FFFFU;
 constexpr std::uint16_t kMaximumReadMemoryLength = 4094U;
 constexpr std::uint16_t kMaximumTransferDataMessageLength = 0x0FFFU;
+constexpr std::uint8_t kLZ4DataFormatIdentifier = 0x10U;
+constexpr std::uint32_t kMaximumLZ4OutputBlockLength = 4096U;
+
+// One shared, allocation-free staging buffer is sufficient because diagnostic
+// requests are dispatched serially by the ISO-TP service.
+std::uint8_t g_lz4BlockBuffer[kMaximumLZ4OutputBlockLength];
 
 struct DownloadState {
     std::uint32_t Address = 0U;
@@ -190,9 +199,10 @@ size_t HandleDiagnosticRequest34(communication_send_callback_t send,
         return length;
     }
 
-    // DFI high nibble selects compression and low nibble selects encryption.
-    // Only the standard no-compression/no-encryption format is supported yet.
-    if (dataFormatIdentifier != 0x00U) {
+    // Compression method 1 is this kernel's raw, independent LZ4 block format.
+    // Encryption remains unsupported.
+    if (dataFormatIdentifier != 0x00U &&
+        dataFormatIdentifier != kLZ4DataFormatIdentifier) {
         const std::uint8_t response[] = {0x7FU, 0x34U, 0x31U};
         send(response, sizeof(response));
         return length;
@@ -258,9 +268,8 @@ size_t HandleDiagnosticRequest35(communication_send_callback_t send,
         return length;
     }
 
-    // Compression and encryption identifiers are manufacturer-specific. The
-    // initial implementation supports only uncompressed, unencrypted upload.
-    if (dataFormatIdentifier != 0x00U) {
+    if (dataFormatIdentifier != 0x00U &&
+        dataFormatIdentifier != kLZ4DataFormatIdentifier) {
         const std::uint8_t response[] = {0x7FU, 0x35U, 0x31U};
         send(response, sizeof(response));
         return length;
@@ -350,12 +359,8 @@ size_t HandleUploadTransferData(communication_send_callback_t send,
         return length;
     }
 
-    constexpr std::uint32_t maximumDataLength =
-        kMaximumTransferDataMessageLength - 2U;
     const std::uint32_t remaining =
         g_uploadState.Size - g_uploadState.BytesTransferred;
-    const std::uint32_t blockLength =
-        remaining < maximumDataLength ? remaining : maximumDataLength;
     const std::uint32_t blockAddress =
         g_uploadState.Address + g_uploadState.BytesTransferred;
 
@@ -363,12 +368,55 @@ size_t HandleUploadTransferData(communication_send_callback_t send,
     g_uploadState.PreviousResponse[1] = blockSequenceCounter;
     const volatile auto* memory =
         reinterpret_cast<const volatile std::uint8_t*>(blockAddress);
-    for (std::uint32_t i = 0U; i < blockLength; ++i) {
-        g_uploadState.PreviousResponse[2U + i] = memory[i];
+
+    std::uint32_t blockLength;
+    if (g_uploadState.DataFormatIdentifier == kLZ4DataFormatIdentifier) {
+        blockLength = remaining < kMaximumLZ4OutputBlockLength
+                          ? remaining
+                          : kMaximumLZ4OutputBlockLength;
+        for (std::uint32_t i = 0U; i < blockLength; ++i) {
+            g_lz4BlockBuffer[i] = memory[i];
+        }
+
+        std::size_t compressedLength;
+        Kernel::LZ4EncodeResult encodeResult;
+        do {
+            compressedLength = kMaximumTransferDataMessageLength - 4U;
+            encodeResult = Kernel::EncodeLZ4Block(
+                g_lz4BlockBuffer, blockLength,
+                g_uploadState.PreviousResponse + 4U, compressedLength);
+            if (encodeResult == Kernel::LZ4EncodeResult::OutputTooSmall) {
+                blockLength /= 2U;
+            }
+        } while (encodeResult == Kernel::LZ4EncodeResult::OutputTooSmall &&
+                 blockLength != 0U);
+
+        if (encodeResult != Kernel::LZ4EncodeResult::Success) {
+            g_uploadState.Active = false;
+            const std::uint8_t response[] = {0x7FU, 0x36U, 0x72U};
+            send(response, sizeof(response));
+            return length;
+        }
+
+        g_uploadState.PreviousResponse[2] =
+            static_cast<std::uint8_t>(blockLength >> 8U);
+        g_uploadState.PreviousResponse[3] =
+            static_cast<std::uint8_t>(blockLength);
+        g_uploadState.PreviousResponseLength =
+            static_cast<std::uint16_t>(4U + compressedLength);
+    } else {
+        constexpr std::uint32_t maximumDataLength =
+            kMaximumTransferDataMessageLength - 2U;
+        blockLength = remaining < maximumDataLength
+                          ? remaining
+                          : maximumDataLength;
+        for (std::uint32_t i = 0U; i < blockLength; ++i) {
+            g_uploadState.PreviousResponse[2U + i] = memory[i];
+        }
+        g_uploadState.PreviousResponseLength =
+            static_cast<std::uint16_t>(2U + blockLength);
     }
 
-    g_uploadState.PreviousResponseLength =
-        static_cast<std::uint16_t>(2U + blockLength);
     g_uploadState.PreviousResponseValid = true;
     g_uploadState.BytesTransferred += blockLength;
     g_uploadState.NextBlockSequenceCounter =
@@ -416,8 +464,38 @@ size_t HandleDownloadTransferData(communication_send_callback_t send,
         return length;
     }
 
-    const std::uint32_t blockLength =
-        static_cast<std::uint32_t>(length - 1U);
+    const bool isLZ4 =
+        g_downloadState.DataFormatIdentifier == kLZ4DataFormatIdentifier;
+    if (isLZ4 && length < 4U) {
+        // BSC, two-byte uncompressed length, and at least one LZ4 byte.
+        const std::uint8_t response[] = {0x7FU, 0x36U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    std::uint32_t blockLength = static_cast<std::uint32_t>(length - 1U);
+    const std::uint8_t* blockData = data + 1U;
+    if (isLZ4) {
+        blockLength = (static_cast<std::uint32_t>(data[1]) << 8U) |
+                      static_cast<std::uint32_t>(data[2]);
+        if (blockLength == 0U ||
+            blockLength > kMaximumLZ4OutputBlockLength) {
+            const std::uint8_t response[] = {0x7FU, 0x36U, 0x31U};
+            send(response, sizeof(response));
+            return length;
+        }
+
+        const Kernel::LZ4DecodeResult decodeResult =
+            Kernel::DecodeLZ4Block(data + 3U, length - 3U,
+                                   g_lz4BlockBuffer, blockLength);
+        if (decodeResult != Kernel::LZ4DecodeResult::Success) {
+            const std::uint8_t response[] = {0x7FU, 0x36U, 0x72U};
+            send(response, sizeof(response));
+            return length;
+        }
+        blockData = g_lz4BlockBuffer;
+    }
+
     const std::uint32_t remaining =
         g_downloadState.Size - g_downloadState.BytesTransferred;
     if (blockLength > remaining) {
@@ -430,7 +508,6 @@ size_t HandleDownloadTransferData(communication_send_callback_t send,
 
     const std::uint32_t blockAddress =
         g_downloadState.Address + g_downloadState.BytesTransferred;
-    const std::uint8_t* blockData = data + 1U;
 
     bool writeSucceeded = false;
     if (IsSRAMRange(blockAddress, blockLength)) {
@@ -477,6 +554,35 @@ size_t HandleDiagnosticRequest36(communication_send_callback_t send,
     return length;
 }
 
+size_t HandleDiagnosticRequest37(communication_send_callback_t send,
+                                 const uint8_t* data,
+                                 size_t length) {
+    // This format has no transferRequestParameterRecord.
+    if (length != 0U) {
+        const std::uint8_t response[] = {0x7FU, 0x37U, 0x13U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    const bool downloadComplete =
+        g_downloadState.Active &&
+        g_downloadState.BytesTransferred == g_downloadState.Size;
+    const bool uploadComplete =
+        g_uploadState.Active &&
+        g_uploadState.BytesTransferred == g_uploadState.Size;
+    if (!downloadComplete && !uploadComplete) {
+        const std::uint8_t response[] = {0x7FU, 0x37U, 0x24U};
+        send(response, sizeof(response));
+        return length;
+    }
+
+    g_downloadState.Active = false;
+    g_uploadState.Active = false;
+    const std::uint8_t response[] = {0x77U};
+    send(response, sizeof(response));
+    return length;
+}
+
 size_t HandleDiagnosticRequest(communication_send_callback_t send,
                                     const void* data,
                                     size_t length) {
@@ -498,6 +604,9 @@ size_t HandleDiagnosticRequest(communication_send_callback_t send,
             return length;
         case 0x36U:
             HandleDiagnosticRequest36(send, request + 1, length - 1U);
+            return length;
+        case 0x37U:
+            HandleDiagnosticRequest37(send, request + 1, length - 1U);
             return length;
         case 0x27U:
             HandleDiagnosticRequest27(send, request + 1, length - 1U);
@@ -582,6 +691,7 @@ extern "C" void EMIOS_11_Handler()
 extern "C" int main(void) 
 {
     InitializeCompanionDSPI();
+    INTC.PSR[kEMIOS11InterruptVector].B.PRI = kEMIOS11InterruptPriority;
     asm("wrteei 1");
     ICANService* canService = new MPC5674FCANService(CANBaudRate::Kbps500, CANBaudRate::Disabled, CANBaudRate::Disabled, CANBaudRate::Disabled, false);
     canService->Send({0x7E8, 0}, {{0x01, 0x99}}, 2);

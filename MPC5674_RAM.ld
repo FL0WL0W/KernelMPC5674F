@@ -2,8 +2,8 @@
 ENTRY(RESET_ENTRY)
 
 /* define heap and stack size */
-__HEAP_SIZE            = 16384 ;
-__STACK_SIZE           = 8192 ;
+__HEAP_SIZE            = 30720 ;
+__STACK_SIZE           = 30720 ;
     
 MEMORY
 {

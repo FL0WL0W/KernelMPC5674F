@@ -224,8 +224,23 @@ Default_Handler:
 	stw   r0,60(r1)
 	mfctr r0
 	stw   r0,64(r1)
+	mfspr r0,26          /* SRR0: interrupted instruction address */
+	stw   r0,68(r1)
+	mfspr r0,27          /* SRR1: interrupted machine state */
+	stw   r0,72(r1)
+
+	/* Allow a higher-priority INTC source to preempt this handler only after
+	 * the interrupted context has been completely saved. INTC.CPR prevents
+	 * equal- and lower-priority sources from nesting. */
+	wrteei 1
+	isync
 
 	bl    \body
+
+	/* Close the nesting window before acknowledging the interrupt and
+	 * restoring the interrupted context. */
+	wrteei 0
+	isync
 
 	/* Peripheral request must be cleared by body before EOIR. */
 	mbar  0
@@ -254,6 +269,10 @@ Default_Handler:
 	lwz   r10,40(r1)
 	lwz   r11,44(r1)
 	lwz   r12,48(r1)
+	lwz   r0,68(r1)
+	mtspr 26,r0
+	lwz   r0,72(r1)
+	mtspr 27,r0
 	lwz   r0,8(r1)
 	addi  r1,r1,80
 	rfi
