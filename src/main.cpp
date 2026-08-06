@@ -40,6 +40,9 @@ constexpr std::uint16_t kMaximumReadMemoryLength = 4094U;
 constexpr std::uint16_t kMaximumTransferDataMessageLength = 0x0FFFU;
 constexpr std::uint8_t kLZ4DataFormatIdentifier = 0x10U;
 constexpr std::uint32_t kMaximumLZ4OutputBlockLength = 4096U;
+constexpr std::uint32_t kBrokenECCFlashRegionLength = 8U;
+constexpr std::uint32_t kBrokenECCFlashRegion1 = 0x0001FFF8U;
+constexpr std::uint32_t kBrokenECCFlashRegion2 = 0x0002FFF8U;
 
 // One shared, allocation-free staging buffer is sufficient because diagnostic
 // requests are dispatched serially by the ISO-TP service.
@@ -71,6 +74,20 @@ struct UploadState {
 };
 
 UploadState g_uploadState;
+
+bool IsProtectedFlashByte(std::uint32_t address) {
+    return (address >= kBrokenECCFlashRegion1 &&
+            address < kBrokenECCFlashRegion1 + kBrokenECCFlashRegionLength) ||
+           (address >= kBrokenECCFlashRegion2 &&
+            address < kBrokenECCFlashRegion2 + kBrokenECCFlashRegionLength);
+}
+
+std::uint8_t ReadMemoryByte(std::uint32_t address) {
+    if (IsProtectedFlashByte(address)) {
+        return 0xFFU;
+    }
+    return *reinterpret_cast<const volatile std::uint8_t*>(address);
+}
 
 bool IsReadableMemoryRange(std::uint32_t address, std::uint32_t length) {
     if (length == 0U || length > kMaximumReadMemoryLength) {
@@ -168,10 +185,8 @@ size_t HandleDiagnosticRequest23(communication_send_callback_t send, const uint8
     std::uint8_t response[1U + readLength];
     response[0] = 0x63U;
 
-    const volatile auto* memory =
-        reinterpret_cast<const volatile std::uint8_t*>(address);
     for (std::uint32_t i = 0U; i < readLength; ++i) {
-        response[1U + i] = memory[i];
+        response[1U + i] = ReadMemoryByte(address + i);
     }
 
     send(response, 1U + readLength);
@@ -366,16 +381,13 @@ size_t HandleUploadTransferData(communication_send_callback_t send,
 
     g_uploadState.PreviousResponse[0] = 0x76U;
     g_uploadState.PreviousResponse[1] = blockSequenceCounter;
-    const volatile auto* memory =
-        reinterpret_cast<const volatile std::uint8_t*>(blockAddress);
-
     std::uint32_t blockLength;
     if (g_uploadState.DataFormatIdentifier == kLZ4DataFormatIdentifier) {
         blockLength = remaining < kMaximumLZ4OutputBlockLength
                           ? remaining
                           : kMaximumLZ4OutputBlockLength;
         for (std::uint32_t i = 0U; i < blockLength; ++i) {
-            g_lz4BlockBuffer[i] = memory[i];
+            g_lz4BlockBuffer[i] = ReadMemoryByte(blockAddress + i);
         }
 
         std::size_t compressedLength;
@@ -411,7 +423,8 @@ size_t HandleUploadTransferData(communication_send_callback_t send,
                           ? remaining
                           : maximumDataLength;
         for (std::uint32_t i = 0U; i < blockLength; ++i) {
-            g_uploadState.PreviousResponse[2U + i] = memory[i];
+            g_uploadState.PreviousResponse[2U + i] =
+                ReadMemoryByte(blockAddress + i);
         }
         g_uploadState.PreviousResponseLength =
             static_cast<std::uint16_t>(2U + blockLength);
