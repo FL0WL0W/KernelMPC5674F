@@ -1,56 +1,44 @@
 /* Entry Point */
-ENTRY(_start)
+ENTRY(RESET_ENTRY)
 
 /* define heap and stack size */
 __HEAP_SIZE            = 16384 ;
 __STACK_SIZE           = 8192 ;
-
-SRAM_SIZE =  128K;    
-/* Define SRAM Base Address */
-SRAM_BASE_ADDR = 0x40020000;
     
 MEMORY
 {
-    SRAM :	org = 0x40020000,   len = 128K
+    SRAM_CODE :	org = 0x40010000,   len = 128K
+    SRAM :	org = 0x40000000,   len = 64K
 }
 
 SECTIONS
 {
-    . = ORIGIN(SRAM);
+    . = ORIGIN(SRAM_CODE);
     
     .intc_vector_table ALIGN(0x10000) :
     {
       KEEP(*(.intc_vector_table))
-    } > SRAM
+    } > SRAM_CODE
 
     .core_exceptions_table ALIGN(0x10) :
     {
       __IVPR_VALUE = . ;
       KEEP(*(.core_exceptions_table))
-    } > SRAM
+    } > SRAM_CODE
 
     .startup ALIGN(4) :
     {
     __start = . ;
     	*(.startup)
-    } > SRAM
+    } > SRAM_CODE
     
     .text_booke :
     { 
-      INPUT_SECTION_FLAGS (!SHF_PPC_VLE)
-      *(.text*)      
-    } > SRAM            
-           
-    .text_vle : 
-    { INPUT_SECTION_FLAGS (SHF_PPC_VLE) 
-      *(.text.startup)
-      *(.text)      
-      *(.text.*)
+      *(.text*)    
       KEEP (*(.init))
-      KEEP (*(.fini))            
-      . = ALIGN(16);      
-    } > SRAM       /* that will force pick VLE .text sections */ 
-
+      KEEP (*(.fini))    
+    } > SRAM_CODE            
+           
     .ctors :
     {
       __CTOR_LIST__ = .;
@@ -73,7 +61,7 @@ SECTIONS
       KEEP (*(SORT(.ctors.*)))
       KEEP (*(.ctors))
       __CTOR_END__ = .;
-    } > SRAM
+    } > SRAM_CODE
 
     .dtors :
     {
@@ -84,14 +72,14 @@ SECTIONS
       KEEP (*(SORT(.dtors.*)))
       KEEP (*(.dtors))
       __DTOR_END__ = .;
-    } > SRAM
+    } > SRAM_CODE
         
     .preinit_array :
     {
       PROVIDE_HIDDEN (__preinit_array_start = .);
       KEEP (*(.preinit_array*))
       PROVIDE_HIDDEN (__preinit_array_end = .);
-    } > SRAM
+    } > SRAM_CODE
 
     .init_array :
     {
@@ -99,7 +87,7 @@ SECTIONS
       KEEP (*(SORT(.init_array.*)))
       KEEP (*(.init_array*))
       PROVIDE_HIDDEN (__init_array_end = .);
-    } > SRAM
+    } > SRAM_CODE
 
     .fini_array :
     {
@@ -107,41 +95,41 @@ SECTIONS
       KEEP (*(SORT(.fini_array.*)))
       KEEP (*(.fini_array*))
       PROVIDE_HIDDEN (__fini_array_end = .);
-    } > SRAM
+    } > SRAM_CODE
         
     .rodata :
     {
       *(.rodata)
       *(.rodata.*)
-    } > SRAM
+    } > SRAM_CODE
     
-    .eh_frame_hdr : { *(.eh_frame_hdr) } > SRAM
-    .eh_frame     : { KEEP (*(.eh_frame)) } > SRAM
+    .eh_frame_hdr : { *(.eh_frame_hdr) } > SRAM_CODE
+    .eh_frame     : { KEEP (*(.eh_frame)) } > SRAM_CODE
     
     .data   : 
     {
       *(.data)
       *(.data.*)
-    }  > SRAM 
+    }  > SRAM_CODE 
     
     .sdata2  :
     {  
       *(.sdata2)
       *(.sdata2.*)
-    } > SRAM 
+    } > SRAM_CODE 
 
     .sbss2    (NOLOAD)   :
     {
       /* _SDA2_BASE_ = .; */ 
       *(.sbss2)
       *(.sbss2.*)
-    } > SRAM
+    } > SRAM_CODE
     
     .sdata  :
     {
       *(.sdata)
       *(.sdata.*)
-    } > SRAM 
+    } > SRAM_CODE 
     
     .bss   (NOLOAD)  :
     {
@@ -152,7 +140,7 @@ SECTIONS
       *(.bss.*)
       *(COMMON)
       __BSS_END = .;
-    } > SRAM
+    } > SRAM_CODE
     
     .stack (NOLOAD) : ALIGN(16) 
     {
@@ -169,20 +157,6 @@ SECTIONS
     } > SRAM
  
 /*-------- LABELS USED IN CODE -------------------------------*/
-        
-/* Labels for Copying Initialised Data from Flash to RAM */
-__DATA_SRAM_ADDR  = ADDR(.data);
-__SDATA_SRAM_ADDR = ADDR(.sdata);
-
-__DATA_SIZE   = SIZEOF(.data);
-__SDATA_SIZE  = SIZEOF(.sdata);
-
-__DATA_ROM_ADDR  = LOADADDR(.data);
-__SDATA_ROM_ADDR = LOADADDR(.sdata);
-   
-/* Labels Used for Initialising SRAM ECC */
-__SRAM_SIZE = SRAM_SIZE;
-__SRAM_BASE_ADDR = SRAM_BASE_ADDR;
      
 __BSS_SIZE    = __BSS_END - __BSS_START;
 
