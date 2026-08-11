@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(LIBRARIES_DIR	    ${CMAKE_SOURCE_DIR}/libs)
-set(EmbeddedIOServicesHardwareAbstraction_Path ${LIBRARIES_DIR}/EmbeddedIOServices/HardwareAbstractions/MPC5674F)
+set(EmbeddedIOServicesHardwareAbstraction_Path ${LIBRARIES_DIR}/EmbeddedIOServices/HardwareAbstractions/MPC5xxx)
 
 include(FetchContent)
 
@@ -43,6 +43,7 @@ ENDIF()
 set(SRC_FILES ${USER_CSOURCES} ${USER_CXXSOURCES} ${EmbeddedIOService_SOURCES} startup_mpc5674f.s MPC5674_RAM.ld)
 add_executable(firmware.elf ${SRC_FILES})
 
+target_compile_definitions(firmware.elf PRIVATE MPC5674F)
 target_link_libraries(firmware.elf EmbeddedIOServices)
 
 set(HEX_FILE ${PROJECT_SOURCE_DIR}/build/Kernel-E92.hex)

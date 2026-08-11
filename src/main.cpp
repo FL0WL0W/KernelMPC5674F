@@ -1,9 +1,9 @@
-#include "MPC5674FCANService.h"
+#include "MPC5xxxFlexCAN2Service.h"
 #include "MPC5674F.h"
 #include "LZ4.h"
 
 using namespace EmbeddedIOServices;
-using namespace MPC5674F;
+using namespace MPC5xxx;
 
 // Override this weak implementation with the target flash driver. Returning
 // false prevents TransferData from acknowledging data that was not programmed.
@@ -701,18 +701,22 @@ extern "C" void EMIOS_11_Handler()
     emiosHits++;
 }
 
+MPC5xxxFlexCAN2Service* canService = nullptr;
+static volatile FLEXCAN2_tag* canTags[] = { &CAN_A };
+static const CANBaudRate canBauds[] = { CANBaudRate::Kbps500 };
+
 extern "C" int main(void) 
 {
     InitializeCompanionDSPI();
     INTC.PSR[kEMIOS11InterruptVector].B.PRI = kEMIOS11InterruptPriority;
     asm("wrteei 1");
-    ICANService* canService = new MPC5674FCANService(CANBaudRate::Kbps500, CANBaudRate::Disabled, CANBaudRate::Disabled, CANBaudRate::Disabled, false);
+    canService = new MPC5xxxFlexCAN2Service(canTags, canBauds, 1);
     canService->Send({0x7E8, 0}, {{0x01, 0x99}}, 2);
     ICommunicationService* isotpService = canService->GetISOTPService({0x7E0, 0}, {0x7E8, 0});
     isotpService->RegisterReceiveCallBack(HandleDiagnosticRequest);
     while(true) 
     {
-        for(volatile int i = 0; i < 100000; i++) ;
+        canService->PollFlexCAN(CAN_A);
     }
     return 0;
 }
