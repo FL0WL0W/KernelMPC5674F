@@ -188,21 +188,21 @@ CallFunctionArrayComplete:
 	addi	r1, r1, 24
 	blr
 
-;# Enter the flash-resident secondary bootloader without retaining any kernel
-;# call frames.  The bootloader clears 0x40000400-0x4001BFFF during entry, so
-;# the kernel's normal stack at 0x4000FD00 cannot be used for this transition.
+;# Enter the flash-resident E92 bootloader upload routine through its exported
+;# application API.  The first function pointer in the bootloader API table at
+;# 0x0000FF80 points to the upload entry (0x0000B1F0 in the analyzed firmware).
 	.section .text_booke, "ax"
 	.align 2
 	.globl ExitToBootloaderUploadRoutine
 	.type ExitToBootloaderUploadRoutine, @function
 ExitToBootloaderUploadRoutine:
 	wrteei	0
-;# Use the bootloader's locked cache-as-RAM stack.  Its secondary-mode entry
-;# clears 0x40000400..0x4001BFFF, so no ordinary SRAM stack is safe here.
+;# The upload entry clears ordinary SRAM through 0x4001BFFF, including the
+;# kernel stack.  Use the bootloader's locked cache-as-RAM stack instead.
 	lis	r1, 0x6000
 	ori	r1, r1, 0x3FF0
-	lis	r12, 0x0002
-	lwz	r12, -0x5060(r12)
+	lis	r12, 0x0001
+	lwz	r12, -0x0080(r12)	;# bootloader API[0] at 0x0000FF80
 	mtctr	r12
 	bctr
 	.size ExitToBootloaderUploadRoutine, .-ExitToBootloaderUploadRoutine
