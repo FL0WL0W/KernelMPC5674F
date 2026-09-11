@@ -221,7 +221,6 @@ namespace E92
 	void MPC5674FFlashService::BeginErase(std::uint32_t now)
 	{
 		_eraseBlock = _eraseQueue[_eraseQueueHead].Block;
-		_erasePhase = 0U;
 		_lastStatusTime = now;
 		CancelHash(_eraseBlock);
 		SendEraseStatus(_eraseQueue[_eraseQueueHead].Send,
@@ -232,8 +231,10 @@ namespace E92
 	bool MPC5674FFlashService::OpenController(
 		Controller controller, std::uint8_t blockIndex)
 	{
+		ControllerSnapshot& snapshot =
+			_controllerSnapshots[controller == Controller::A ? 0U : 1U];
 		if (controller == Controller::None || blockIndex >= BlockCount ||
-			_controllerSnapshot.Valid)
+			snapshot.Valid)
 			return false;
 
 		volatile struct FLASH_tag& flash = FlashController(controller);
@@ -241,11 +242,11 @@ namespace E92
 			return false;
 
 		const FlashBlock& block = FlashBlocks[blockIndex];
-		_controllerSnapshot.BIUCR = flash.BIUCR.R;
-		_controllerSnapshot.LMLR = flash.LMLR.R;
-		_controllerSnapshot.SLMLR = flash.SLMLR.R;
-		_controllerSnapshot.HLR = flash.HLR.R;
-		_controllerSnapshot.Valid = true;
+		snapshot.BIUCR = flash.BIUCR.R;
+		snapshot.LMLR = flash.LMLR.R;
+		snapshot.SLMLR = flash.SLMLR.R;
+		snapshot.HLR = flash.HLR.R;
+		snapshot.Valid = true;
 
 		flash.BIUCR.B.IPFEN = 0U;
 		flash.BIUCR.B.DPFEN = 0U;
@@ -283,17 +284,18 @@ namespace E92
 		return true;
 	}
 
-	void MPC5674FFlashService::CloseController(bool programming)
+	void MPC5674FFlashService::CloseController(
+		Controller controller, bool programming)
 	{
-		const Controller controller = programming
-			? _programController : _eraseController;
 		if (controller == Controller::None)
 			return;
-		if (!_controllerSnapshot.Valid)
+		ControllerSnapshot& snapshot =
+			_controllerSnapshots[controller == Controller::A ? 0U : 1U];
+		if (!snapshot.Valid)
 		{
-			if (programming)
+			if (programming && _programController == controller)
 				_programController = Controller::None;
-			else
+			else if (!programming && _eraseController == controller)
 				_eraseController = Controller::None;
 			return;
 		}
@@ -312,40 +314,30 @@ namespace E92
 		Synchronize();
 
 		RestoreLocks(flash,
-			_controllerSnapshot.LMLR,
-			_controllerSnapshot.SLMLR,
-			_controllerSnapshot.HLR);
+			snapshot.LMLR,
+			snapshot.SLMLR,
+			snapshot.HLR);
 		// Toggling BFEN invalidates stale line-buffer contents before restoring
 		// the original prefetch configuration.
 		flash.BIUCR.B.BFEN = 0U;
 		Synchronize();
-		flash.BIUCR.R = _controllerSnapshot.BIUCR;
+		flash.BIUCR.R = snapshot.BIUCR;
 		Synchronize();
 
-		_controllerSnapshot = ControllerSnapshot();
-		if (programming)
+		snapshot = ControllerSnapshot();
+		if (programming && _programController == controller)
 			_programController = Controller::None;
-		else
+		else if (!programming && _eraseController == controller)
 			_eraseController = Controller::None;
 	}
 
-	void MPC5674FFlashService::StartErasePhase()
+	bool MPC5674FFlashService::PrepareEraseController(Controller controller)
 	{
 		const FlashBlock& block = FlashBlocks[_eraseBlock];
-		if (block.Area == BlockArea::High)
-			_eraseController = _erasePhase == 0U ? Controller::A : Controller::B;
-		else if (block.Area == BlockArea::ALow || block.Area == BlockArea::AMid)
-			_eraseController = Controller::A;
-		else
-			_eraseController = Controller::B;
+		if (!OpenController(controller, _eraseBlock))
+			return false;
 
-		if (!OpenController(_eraseController, _eraseBlock))
-		{
-			CompleteErase(EraseStatus::Failed);
-			return;
-		}
-
-		volatile struct FLASH_tag& flash = FlashController(_eraseController);
+		volatile struct FLASH_tag& flash = FlashController(controller);
 		flash.MCR.B.ERS = 1U;
 		if (block.Area == BlockArea::High)
 			flash.HSR.B.HBSEL = 1UL << block.HardwareIndex;
@@ -357,41 +349,86 @@ namespace E92
 		// Bit 4 selects the physical half of an interleaved high-flash line.
 		const std::uint32_t interlockAddress = block.Address +
 			((block.Area == BlockArea::High &&
-			  _eraseController == Controller::B) ? 0x10U : 0U);
+			  controller == Controller::B) ? 0x10U : 0U);
 		*reinterpret_cast<volatile std::uint32_t*>(interlockAddress) = 0xFFFFFFFFU;
 		Synchronize();
-		flash.MCR.B.EHV = 1U;
-		Synchronize();
+		return true;
+	}
+
+	void MPC5674FFlashService::StartErasePhase()
+	{
+		const FlashBlock& block = FlashBlocks[_eraseBlock];
+		if (block.Area == BlockArea::High)
+		{
+			_eraseController = Controller::None;
+			if (!PrepareEraseController(Controller::A) ||
+				!PrepareEraseController(Controller::B))
+			{
+				CompleteErase(EraseStatus::Failed);
+				return;
+			}
+
+			// Both controllers are completely configured before either internal
+			// erase algorithm begins. The writes are only a few peripheral cycles
+			// apart, so the two 256 KiB physical halves erase concurrently.
+			FLASH_A.MCR.B.EHV = 1U;
+			Synchronize();
+			FLASH_B.MCR.B.EHV = 1U;
+			Synchronize();
+		}
+		else
+		{
+			_eraseController =
+				(block.Area == BlockArea::ALow || block.Area == BlockArea::AMid)
+				? Controller::A : Controller::B;
+			if (!PrepareEraseController(_eraseController))
+			{
+				CompleteErase(EraseStatus::Failed);
+				return;
+			}
+			FlashController(_eraseController).MCR.B.EHV = 1U;
+			Synchronize();
+		}
 		_operation = Operation::EraseWait;
 	}
 
 	void MPC5674FFlashService::WaitForErase()
 	{
+		if (FlashBlocks[_eraseBlock].Area == BlockArea::High)
+		{
+			if (FLASH_A.MCR.B.DONE == 0U || FLASH_B.MCR.B.DONE == 0U)
+				return;
+
+			const bool successful =
+				FLASH_A.MCR.B.PEG != 0U && FLASH_B.MCR.B.PEG != 0U;
+			CloseController(Controller::A, false);
+			CloseController(Controller::B, false);
+			CompleteErase(successful
+				? EraseStatus::Successful : EraseStatus::Failed);
+			return;
+		}
+
 		volatile struct FLASH_tag& flash = FlashController(_eraseController);
 		if (flash.MCR.B.DONE == 0U)
 			return;
 
 		const bool successful = flash.MCR.B.PEG != 0U;
-		CloseController(false);
+		CloseController(_eraseController, false);
 		if (!successful)
 		{
 			CompleteErase(EraseStatus::Failed);
 			return;
 		}
 
-		if (FlashBlocks[_eraseBlock].Area == BlockArea::High && _erasePhase == 0U)
-		{
-			_erasePhase = 1U;
-			_operation = Operation::EraseStart;
-			return;
-		}
 		CompleteErase(EraseStatus::Successful);
 	}
 
 	void MPC5674FFlashService::CompleteErase(EraseStatus status)
 	{
-		if (_eraseController != Controller::None)
-			CloseController(false);
+		if (_controllerSnapshots[0].Valid)
+			CloseController(Controller::A, false);
+		if (_controllerSnapshots[1].Valid)
+			CloseController(Controller::B, false);
 		const bool successful = status == EraseStatus::Successful;
 		MarkEraseResult(_eraseBlock, successful);
 
@@ -461,12 +498,14 @@ namespace E92
 			CompleteProgram(false);
 			return;
 		}
+		const bool blockKnownErased =
+			_cacheStatus[blockIndex] == CacheStatus::ErasedAwaitingRewrite;
 
 		const Controller targetController = ControllerForAddress(address);
 		if (_programController != targetController || _programBlock != blockIndex)
 		{
 			if (_programController != Controller::None)
-				CloseController(true);
+				CloseController(_programController, true);
 			_programController = targetController;
 			_programBlock = static_cast<std::uint8_t>(blockIndex);
 			if (!OpenController(_programController, _programBlock))
@@ -487,33 +526,43 @@ namespace E92
 		{
 			const std::uint8_t* const desired =
 				_activeProgram.Data + _programOffset + offset;
-			bool equal = true;
-			bool erased = true;
+			bool allFF = true;
+			for (std::size_t byte = 0U; byte < ECCSegmentSize; ++byte)
+				allFF = allFF && desired[byte] == 0xFFU;
+
+			const bool segmentKnownErased = blockKnownErased &&
+				address + offset >= _rewriteThrough[blockIndex];
+			if (segmentKnownErased)
+			{
+				if (!allFF)
+					programMask |= static_cast<std::uint8_t>(
+						1U << (offset / ECCSegmentSize));
+				continue;
+			}
+
+			// Without a recorded erase, programming the same 64-bit ECC segment
+			// again is unsafe even if the visible data only changes from 1 to 0.
+			// Accept an exact match as a no-op; otherwise require an erase first.
 			if (IsInvalidECCAddress(address + offset))
 			{
-				// Reading this segment can machine-check. FF needs no operation;
-				// non-FF is permitted after the explicit block erase protocol.
-				for (std::size_t byte = 0U; byte < ECCSegmentSize; ++byte)
-					equal = equal && desired[byte] == 0xFFU;
-			}
-			else
-			{
-				const volatile std::uint8_t* const current =
-					reinterpret_cast<const volatile std::uint8_t*>(address + offset);
-				for (std::size_t byte = 0U; byte < ECCSegmentSize; ++byte)
+				if (!allFF)
 				{
-					equal = equal && current[byte] == desired[byte];
-					erased = erased && current[byte] == 0xFFU;
+					CompleteProgram(false);
+					return;
 				}
-			}
-			if (equal)
 				continue;
-			if (!erased)
+			}
+
+			const volatile std::uint8_t* const current =
+				reinterpret_cast<const volatile std::uint8_t*>(address + offset);
+			bool equal = true;
+			for (std::size_t byte = 0U; byte < ECCSegmentSize; ++byte)
+				equal = equal && current[byte] == desired[byte];
+			if (!equal)
 			{
 				CompleteProgram(false);
 				return;
 			}
-			programMask |= static_cast<std::uint8_t>(1U << (offset / ECCSegmentSize));
 		}
 
 		_programNextOffset = _programOffset + pageLength;
@@ -571,7 +620,7 @@ namespace E92
 	void MPC5674FFlashService::CompleteProgram(bool successful)
 	{
 		if (_programController != Controller::None)
-			CloseController(true);
+			CloseController(_programController, true);
 		MarkProgramResult(successful);
 
 		UDSFlashWriteCompletion completion = _activeProgram.Completion;

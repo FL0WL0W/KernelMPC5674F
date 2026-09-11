@@ -105,7 +105,6 @@ namespace E92
 		Operation _operation = Operation::Idle;
 		Controller _eraseController = Controller::None;
 		Controller _programController = Controller::None;
-		std::uint8_t _erasePhase = 0U;
 		std::uint8_t _eraseBlock = 0U;
 		std::uint8_t _programBlock = 0U;
 		std::size_t _programOffset = 0U;
@@ -113,7 +112,7 @@ namespace E92
 		std::uint32_t _lastStatusTime = 0U;
 		std::uint32_t _nextOperationSequence = 0U;
 
-		ControllerSnapshot _controllerSnapshot;
+		ControllerSnapshot _controllerSnapshots[2];
 		EraseRequest _eraseQueue[BlockCount];
 		std::size_t _eraseQueueHead = 0U;
 		std::size_t _eraseQueueCount = 0U;
@@ -156,7 +155,8 @@ namespace E92
 		void CompleteProgram(bool successful);
 
 		bool OpenController(Controller controller, std::uint8_t block);
-		void CloseController(bool programming);
+		void CloseController(Controller controller, bool programming);
+		bool PrepareEraseController(Controller controller);
 		static Controller ControllerForAddress(std::uint32_t address);
 		static volatile struct FLASH_tag& FlashController(Controller controller);
 
