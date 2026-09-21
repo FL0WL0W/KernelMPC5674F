@@ -146,9 +146,11 @@ RunGlobalConstructors:
 	ori	r4, r4, __preinit_array_end@l
 	bl	CallFunctionArray
 
-	;# Supplied by the PowerPC runtime. Among other runtime initialization,
-	;# this invokes the legacy .ctors list in its required reverse order.
-	bl	__init
+	lis	r3, __CTOR_LIST__@h
+	ori	r3, r3, __CTOR_LIST__@l
+	lis	r4, __CTOR_END__@h
+	ori	r4, r4, __CTOR_END__@l
+	bl	CallFunctionArrayReverse
 
 	lis	r3, __init_array_start@h
 	ori	r3, r3, __init_array_start@l
@@ -188,6 +190,33 @@ CallFunctionArrayComplete:
 	addi	r1, r1, 24
 	blr
 
+;# Legacy .ctors entries execute in reverse order.
+CallFunctionArrayReverse:
+	stwu	r1, -24(r1)
+	mflr	r0
+	stw	r0, 28(r1)
+	stw	r30, 16(r1)
+	stw	r31, 20(r1)
+	mr	r30, r3
+	mr	r31, r4
+CallFunctionArrayReverseLoop:
+	cmplw	r30, r31
+	beq	CallFunctionArrayReverseComplete
+	addi	r31, r31, -4
+	lwz	r12, 0(r31)
+	cmpwi	r12, 0
+	beq	CallFunctionArrayReverseLoop
+	mtctr	r12
+	bctrl
+	b	CallFunctionArrayReverseLoop
+CallFunctionArrayReverseComplete:
+	lwz	r30, 16(r1)
+	lwz	r31, 20(r1)
+	lwz	r0, 28(r1)
+	mtlr	r0
+	addi	r1, r1, 24
+	blr
+
 ;# Enter the flash-resident E92 bootloader upload routine through its exported
 ;# application API.  The first function pointer in the bootloader API table at
 ;# 0x0000FF80 points to the upload entry (0x0000B1F0 in the analyzed firmware).
@@ -206,3 +235,11 @@ ExitToBootloaderUploadRoutine:
 	mtctr	r12
 	bctr
 	.size ExitToBootloaderUploadRoutine, .-ExitToBootloaderUploadRoutine
+
+;# The NXP EABI link specs force-retain __eabi, which references this hook.
+;# Startup and constructor initialization are handled explicitly above.
+	.globl __init
+	.type __init, @function
+__init:
+	blr
+	.size __init, .-__init

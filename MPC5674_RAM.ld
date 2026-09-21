@@ -2,8 +2,8 @@
 ENTRY(_start)
 
 /* define heap and stack size */
-__HEAP_SIZE            = 24000 ;
-__STACK_SIZE           = 16000 ;
+__HEAP_SIZE            = 32K ;
+__STACK_SIZE           = 32K ;
     
 MEMORY
 {
@@ -13,6 +13,22 @@ MEMORY
 
 SECTIONS
 {
+    /* The kernel never returns or performs C++ runtime teardown. */
+    /DISCARD/ :
+    {
+      *(.dtors)
+      *(.dtors.*)
+      *(.init)
+      *(.init.*)
+      *(.fini)
+      *(.fini.*)
+      *(.fini_array)
+      *(.fini_array.*)
+      *(.eh_frame)
+      *(.eh_frame.*)
+      *(.eh_frame_hdr)
+    }
+
     . = ORIGIN(SRAM_CODE);
 
     .startup ALIGN(4) :
@@ -24,45 +40,16 @@ SECTIONS
     .text_booke :
     { 
       *(.text*)    
-      KEEP (*(.init))
-      KEEP (*(.fini))    
     } > SRAM_CODE            
            
     .ctors :
     {
       __CTOR_LIST__ = .;
-      /* gcc uses crtbegin.o to find the start of
-         the constructors, so we make sure it is
-         first.  Because this is a wildcard, it
-         doesn't matter if the user does not
-         actually link against crtbegin.o; the
-         linker won't look for a file to match a
-         wildcard.  The wildcard also means that it
-         doesn't matter which directory crtbegin.o
-         is in.  */
-      KEEP (*crtbegin.o(.ctors))
-      KEEP (*crtbegin?.o(.ctors))
-      /* We don't want to include the .ctor section from
-         from the crtend.o file until after the sorted ctors.
-         The .ctor section from the crtend file contains the
-         end of ctors marker and it must be last */
-      KEEP (*(EXCLUDE_FILE(*crtend?.o *crtend.o) .ctors))
       KEEP (*(SORT(.ctors.*)))
       KEEP (*(.ctors))
       __CTOR_END__ = .;
     } > SRAM_CODE
 
-    .dtors :
-    {
-      __DTOR_LIST__ = .;
-      KEEP (*crtbegin.o(.dtors))
-      KEEP (*crtbegin?.o(.dtors))
-      KEEP (*(EXCLUDE_FILE(*crtend?.o *crtend.o) .dtors))
-      KEEP (*(SORT(.dtors.*)))
-      KEEP (*(.dtors))
-      __DTOR_END__ = .;
-    } > SRAM_CODE
-        
     .preinit_array :
     {
       PROVIDE_HIDDEN (__preinit_array_start = .);
@@ -78,22 +65,11 @@ SECTIONS
       PROVIDE_HIDDEN (__init_array_end = .);
     } > SRAM_CODE
 
-    .fini_array :
-    {
-      PROVIDE_HIDDEN (__fini_array_start = .);
-      KEEP (*(SORT(.fini_array.*)))
-      KEEP (*(.fini_array*))
-      PROVIDE_HIDDEN (__fini_array_end = .);
-    } > SRAM_CODE
-        
     .rodata :
     {
       *(.rodata)
       *(.rodata.*)
     } > SRAM_CODE
-    
-    .eh_frame_hdr : { *(.eh_frame_hdr) } > SRAM_CODE
-    .eh_frame     : { KEEP (*(.eh_frame)) } > SRAM_CODE
     
     .data   : 
     {
@@ -102,7 +78,8 @@ SECTIONS
     }  > SRAM_CODE 
     
     .sdata2  :
-    {  
+    {
+      __SDATA2_START__ = .;
       *(.sdata2)
       *(.sdata2.*)
     } > SRAM_CODE 
@@ -112,10 +89,12 @@ SECTIONS
       /* _SDA2_BASE_ = .; */ 
       *(.sbss2)
       *(.sbss2.*)
+      __SBSS2_END__ = .;
     } > SRAM_CODE
     
     .sdata  :
     {
+      __SDATA_START__ = .;
       *(.sdata)
       *(.sdata.*)
     } > SRAM_CODE 
@@ -125,6 +104,7 @@ SECTIONS
       __BSS_START = .;
       *(.sbss)
       *(.sbss.*)	
+      __SBSS_END__ = .;
       *(.bss)
       *(.bss.*)
       *(COMMON)
@@ -140,18 +120,12 @@ SECTIONS
       __HEAP_END = . ;
     } > SRAM
 
-    .stack (NOLOAD) : ALIGN(16) 
+    .stack ORIGIN(SRAM) + LENGTH(SRAM) - __STACK_SIZE (NOLOAD) :
     {
-      __HEAP = . ;
-      PROVIDE (_end = . );
-      PROVIDE (end = . );            
-      . += __HEAP_SIZE ;
-      __HEAP_END = . ;
       _stack_end = . ;
       . +=  __STACK_SIZE ;
       _stack_addr = . ;
       __SP_INIT = . ;
-      . += 4;
     } > SRAM
  
 /*-------- LABELS USED IN CODE -------------------------------*/
@@ -159,4 +133,3 @@ SECTIONS
 __BSS_SIZE    = __BSS_END - __BSS_START;
 
 }
-
