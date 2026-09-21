@@ -21,6 +21,10 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(EmbeddedIOServices)
 
+set(NANO_SPECS "${CMAKE_SYSROOT}/lib/nano.specs")
+set(NOSYS_SPECS "${CMAKE_SYSROOT}/lib/nosys.specs")
+target_compile_options(EmbeddedIOServices PRIVATE "-specs=${NANO_SPECS}")
+
 include_directories(include)
 include_directories(${EmbeddedIOServicesHardwareAbstraction_Path}/include)
 
@@ -34,14 +38,22 @@ file(GLOB_RECURSE USER_CXXSOURCES_Templates src/*_template.cpp)
 IF(USER_CXXSOURCES_Templates)
         list(REMOVE_ITEM USER_CXXSOURCES ${USER_CXXSOURCES_Templates})
 ENDIF()
-file(GLOB_RECURSE EmbeddedIOService_SOURCES ${EmbeddedIOServicesHardwareAbstraction_Path}/src/*.cpp)
-file(GLOB_RECURSE EmbeddedIOService_SOURCES_Templates ${EmbeddedIOServicesHardwareAbstraction_Path}/src/*_template.cpp)
-IF(EmbeddedIOService_SOURCES_Templates)
-        list(REMOVE_ITEM EmbeddedIOService_SOURCES ${EmbeddedIOService_SOURCES_Templates})
-ENDIF()
+set(EmbeddedIOServiceHardwareAbstraction_SRCS
+    ${EmbeddedIOServicesHardwareAbstraction_Path}/src/MPC5xxxSystemClockService.cpp
+    ${EmbeddedIOServicesHardwareAbstraction_Path}/src/MPC56xxSystemClockService.cpp
+    ${EmbeddedIOServicesHardwareAbstraction_Path}/src/MPC5xxxFlexCAN2Service.cpp
+    ${EmbeddedIOServicesHardwareAbstraction_Path}/src/MPC5xxxSPIService.cpp
+)
 
-set(SRC_FILES ${USER_CSOURCES} ${USER_CXXSOURCES} ${EmbeddedIOService_SOURCES} startup_mpc5674f.s MPC5674_RAM.ld)
+set(SRC_FILES ${USER_CSOURCES} ${USER_CXXSOURCES} ${EmbeddedIOServiceHardwareAbstraction_SRCS} startup_mpc5674f.s MPC5674_RAM.ld)
 add_executable(firmware.elf ${SRC_FILES})
+
+target_compile_options(firmware.elf PRIVATE
+        "$<$<COMPILE_LANGUAGE:C>:-specs=${NANO_SPECS}>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-specs=${NANO_SPECS}>")
+target_link_options(firmware.elf PRIVATE
+        "-specs=${NANO_SPECS}"
+        "-specs=${NOSYS_SPECS}")
 
 target_compile_definitions(firmware.elf PRIVATE MPC5674F)
 target_link_libraries(firmware.elf EmbeddedIOServices)
