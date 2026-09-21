@@ -65,6 +65,8 @@ extern "C" int main()
 		{0x00000000U, 0x0001FFF8U, true},
 		{0x00020000U, 0x0000FFF8U, true},
 		{0x00030000U, 0x003D0000U, true},
+		{0x00EFC000U, 0x00004000U, true},
+		{0x00FFC000U, 0x00004000U, true},
 		{0x40000000U, 0x00040000U, false},
 	};
 	const E92::UDSMemoryRegion udsWriteRegions[] = {
