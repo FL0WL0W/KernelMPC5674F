@@ -11,6 +11,8 @@ namespace E92
 	{
 	private:
 		EmbeddedIOServices::ISPIService& _service;
+		std::uint8_t _commandBuffer[2] = {};
+		bool _commandPending = false;
 		bool SendCommand(std::uint8_t first, std::uint8_t second);
 
 	public:

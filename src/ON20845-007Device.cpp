@@ -8,8 +8,19 @@ namespace E92
 		std::uint8_t first,
 		std::uint8_t second)
 	{
-		std::uint8_t command[] = {first, second};
-		return _service.Transfer(command, sizeof(command), nullptr);
+		if (_commandPending)
+			return false;
+		_commandBuffer[0] = first;
+		_commandBuffer[1] = second;
+		_commandPending = true;
+		if (_service.Transfer(
+				_commandBuffer,
+				nullptr,
+				sizeof(_commandBuffer),
+				[this]() { _commandPending = false; }))
+			return true;
+		_commandPending = false;
+		return false;
 	}
 
 	void ON20845_007Device::ServiceWatchdog()
@@ -25,10 +36,12 @@ namespace E92
 
 		_service.Transfer(
 			reinterpret_cast< std::uint8_t *>(message),
+			nullptr,
 			6,
 			nullptr);
 		_service.Transfer(
 			reinterpret_cast< std::uint8_t *>(message) + 6,
+			nullptr,
 			6,
 			nullptr);
 

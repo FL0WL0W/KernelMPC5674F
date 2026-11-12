@@ -54,7 +54,7 @@ extern "C" int main()
 	asm("wrteei 0");
 
 	MPC56xxSystemClockService::Initialize(8000000U, 256000000U);
-	MPC5xxxSPIService on20845SPI(&DSPI_D, ON20845Configuration, 0U);
+	MPC5xxxSPIService on20845SPI(&DSPI_D, ON20845Configuration, 0U, 0U);
 	E92::ON20845_007Device on20845(on20845SPI);
 
     MPC5xxxFlexCAN2Service::Initialize(CAN_A, CANBaudRate::Kbps500, 0U);
@@ -109,7 +109,7 @@ extern "C" int main()
 	while (true)
 	{
 		MPC5xxxFlexCAN2Service::PollFlexCAN(CAN_A);
-		MPC5xxxSPIService::Service(DSPI_D);
+		MPC5xxxSPIService::Service(&DSPI_D);
 
 		const std::uint32_t now = ReadTimebase();
 		flashService.Service(now, isotp->Ready());
