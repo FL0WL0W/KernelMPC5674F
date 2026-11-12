@@ -16,29 +16,51 @@ While running, the kernel services both the MPC core watchdog and the ON20845-00
 
 ## Build
 
-Requirements:
-
-- CMake 4.0 or newer
-- GNU Make
-- NXP's `powerpc-eabivle` GCC toolchain in `PATH`
-- Git/network access the first time CMake fetches `EmbeddedIOServices`
-
-Example using the S32 Design Studio toolchain:
+Requirements: CMake 4.0+, GNU Make, Git, Python 3, a native C/C++17 compiler
+(Clang 18 works), and network access to fetch dependencies and refresh LLVM.
 
 ```bash
-export PATH="/home/daniel/NXP/S32DS_Power_v2.1/S32DS/build_tools/powerpc-eabivle-4_9/bin:$PATH"
-cd /home/daniel/git/KernelMPC5674F
 cmake --preset MPC5674F-Release
-cmake --build build/MPC5674F-Release -j"$(nproc)"
+cmake --build --preset MPC5674F-Release --parallel
 ```
+
+The toolchain fetches the latest `main` from
+[FL0WL0W/llvm-project](https://github.com/FL0WL0W/llvm-project) on each configure
+and builds native Clang, LLD, and LLVM object/archive tools as needed. It targets
+32-bit, big-endian PowerPC Book E with `-mcpu=e200z7` and hardware SPE
+single-precision floating point. Startup enables SPE before running C++ code.
+
+`toolchain.cmake` owns the compiler bootstrap; `cmake/llvm-bootstrap/` and
+`cmake/fetch-llvm.cmake` fetch and build LLVM. `cmake/Runtime.cmake` builds
+Picolibc, compiler-rt, libc++, and libc++abi from source and exposes `e200_runtime`.
+The C++ runtime libraries always use full LTO. Application optimization, CPU,
+and `-flto=full` flags are declared in `CMakePresets.json`; the runtime helper
+extracts `-mcpu=` from the C flags to select CPU-specific runtime directories.
+The kernel uses C++17 and libc++ ABI v2 without exceptions, RTTI, threads, or
+runtime teardown. Picolibc and compiler-rt stay outside LTO.
+
+Keep `toolchain.cmake` and `cmake/` together when reusing them. Set
+`E200_LLVM_ROOT` to a shared directory to reuse the host compiler across projects;
+it defaults to `_deps` in the consuming build directory. For example:
+
+```bash
+cmake --preset MPC5674F-Release -DE200_LLVM_ROOT=/path/to/shared-e200-cache
+```
+
+`E200_LLVM_BUILD_JOBS` controls the native LLVM build's parallelism (default 16).
+LLVM logs are `llvm-host-configure.log` and `llvm-host-build.log` under
+`E200_LLVM_ROOT`. After a compiler update, clean the application and target-runtime
+builds before rebuilding. Use `cmake --fresh --preset MPC5674F-Release` when
+migrating an existing GCC build or changing compiler or CPU settings.
 
 Build outputs:
 
 | File | Purpose |
 | --- | --- |
-| `build/Kernel-E92.bin` | Raw binary to load into SRAM |
-| `build/Kernel-E92.hex` | Intel HEX representation |
+| `build/MPC5674F-Release/Kernel-E92.bin` | Raw binary to load into SRAM |
+| `build/MPC5674F-Release/Kernel-E92.hex` | Intel HEX representation |
 | `build/MPC5674F-Release/firmware.elf` | ELF with symbols for debugging |
+| `build/MPC5674F-Release/firmware.map` | Linker map and memory layout |
 
 The binary is linked for `0x40010000` and must fit inside the 128 KiB `SRAM_CODE` region defined by `MPC5674_RAM.ld`. It is not position independent and must not be loaded at a different address.
 

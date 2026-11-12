@@ -1,14 +1,14 @@
- cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 4.0)
 
 project ( KernelMPC5674F C CXX ASM )
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(LIBRARIES_DIR	    ${CMAKE_SOURCE_DIR}/libs)
-set(EmbeddedIOServicesHardwareAbstraction_Path ${LIBRARIES_DIR}/EmbeddedIOServices/HardwareAbstractions/MPC5xxx)
 
 include(FetchContent)
+include(cmake/Runtime.cmake)
 
 FetchContent_Declare(
     EmbeddedIOServices
@@ -21,9 +21,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(EmbeddedIOServices)
 
-set(NANO_SPECS "${CMAKE_SYSROOT}/lib/nano.specs")
-set(NOSYS_SPECS "${CMAKE_SYSROOT}/lib/nosys.specs")
-target_compile_options(EmbeddedIOServices PRIVATE "-specs=${NANO_SPECS}")
+target_link_libraries(EmbeddedIOServices PUBLIC e200_runtime)
+set(EmbeddedIOServicesHardwareAbstraction_Path "${embeddedioservices_SOURCE_DIR}/HardwareAbstractions/MPC5xxx")
 
 include_directories(include)
 include_directories(${EmbeddedIOServicesHardwareAbstraction_Path}/include)
@@ -45,22 +44,20 @@ set(EmbeddedIOServiceHardwareAbstraction_SRCS
     ${EmbeddedIOServicesHardwareAbstraction_Path}/src/MPC5xxxSPIService.cpp
 )
 
-set(SRC_FILES ${USER_CSOURCES} ${USER_CXXSOURCES} ${EmbeddedIOServiceHardwareAbstraction_SRCS} startup_mpc5674f.s MPC5674_RAM.ld)
+set(SRC_FILES ${USER_CSOURCES} ${USER_CXXSOURCES} ${EmbeddedIOServiceHardwareAbstraction_SRCS} startup_mpc5674f.S MPC5674_RAM.ld)
 add_executable(firmware.elf ${SRC_FILES})
 
-target_compile_options(firmware.elf PRIVATE
-        "$<$<COMPILE_LANGUAGE:C>:-specs=${NANO_SPECS}>"
-        "$<$<COMPILE_LANGUAGE:CXX>:-specs=${NANO_SPECS}>")
-target_link_options(firmware.elf PRIVATE
-        "-specs=${NANO_SPECS}"
-        "-specs=${NOSYS_SPECS}")
+set_property(TARGET firmware.elf PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/MPC5674_RAM.ld")
 
 target_compile_definitions(firmware.elf PRIVATE MPC5674F)
 target_link_libraries(firmware.elf EmbeddedIOServices)
 
-set(HEX_FILE ${PROJECT_SOURCE_DIR}/build/Kernel-E92.hex)
-set(BIN_FILE ${PROJECT_SOURCE_DIR}/build/Kernel-E92.bin)
+set(HEX_FILE "${CMAKE_CURRENT_BINARY_DIR}/Kernel-E92.hex")
+set(BIN_FILE "${CMAKE_CURRENT_BINARY_DIR}/Kernel-E92.bin")
 add_custom_command(TARGET firmware.elf POST_BUILD
-        COMMAND ${CMAKE_OBJCOPY} ARGS -O ihex $<TARGET_FILE:firmware.elf> ${HEX_FILE}
-        COMMAND ${CMAKE_OBJCOPY} ARGS -O binary $<TARGET_FILE:firmware.elf> ${BIN_FILE}
-        COMMENT "Building ${HEX_FILE} \nBuilding ${BIN_FILE}")
+    COMMAND "${CMAKE_OBJCOPY}" -O ihex $<TARGET_FILE:firmware.elf> "${HEX_FILE}"
+    COMMAND "${CMAKE_OBJCOPY}" -O binary $<TARGET_FILE:firmware.elf> "${BIN_FILE}"
+    COMMAND "${CMAKE_SIZE}" $<TARGET_FILE:firmware.elf>
+    BYPRODUCTS "${HEX_FILE}" "${BIN_FILE}"
+    VERBATIM
+)
